@@ -17,10 +17,44 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from llm_client import llm_completion
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+class PastelFormatter(logging.Formatter):
+    PASTEL_BLUE = "\033[38;5;117m"
+    PASTEL_GREEN = "\033[38;5;114m"
+    PASTEL_YELLOW = "\033[38;5;229m"
+    PASTEL_RED = "\033[38;5;210m"
+    PASTEL_PURPLE = "\033[38;5;183m"
+    RESET = "\033[0m"
+
+    def format(self, record):
+        color = self.PASTEL_GREEN
+        if record.levelno == logging.WARNING:
+            color = self.PASTEL_YELLOW
+        elif record.levelno >= logging.ERROR:
+            color = self.PASTEL_RED
+        elif record.levelno == logging.DEBUG:
+            color = self.PASTEL_BLUE
+            
+        msg = str(record.msg)
+        if "LLM Response" in msg:
+            color = self.PASTEL_PURPLE
+        elif "LLM Prompt" in msg:
+            color = self.PASTEL_BLUE
+        elif "Bridge request" in msg:
+            color = self.PASTEL_BLUE
+
+        formatted = super().format(record)
+        return f"{color}{formatted}{self.RESET}"
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+if not root_logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(PastelFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    root_logger.addHandler(handler)
+else:
+    for handler in root_logger.handlers:
+        handler.setFormatter(PastelFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+
 logger = logging.getLogger("llm_bridge")
 
 BRIDGE_PORT = 5099
@@ -132,6 +166,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         elapsed = time.time() - t0
         logger.info("Bridge response in %.2fs: %d chars", elapsed, len(raw_response))
+        logger.info(f"LLM Response:\n{raw_response}\n")
 
         # Try to detect tool calls in the response.
         # Always attempt parsing — OpenClaw injects tool definitions into the
