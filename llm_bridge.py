@@ -15,7 +15,17 @@ import time
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from llm_client import llm_completion
+from llm_client import llm_completion, llm_completion_structured
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional
+
+class BridgeToolCall(BaseModel):
+    name: str = Field(description="The name of the tool to call")
+    arguments: Dict[str, Any] = Field(description="The JSON arguments to pass to the tool")
+
+class BridgeChatResponse(BaseModel):
+    content: Optional[str] = Field(None, description="The text response to the user. Use this if NO tool is being called.")
+    tool_calls: Optional[List[BridgeToolCall]] = Field(None, description="The list of tools to call. Leave null if no tools are needed.")
 
 class PastelFormatter(logging.Formatter):
     PASTEL_BLUE = "\033[38;5;117m"
@@ -139,9 +149,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             tools_section = (
                 "\n\n## Available Tools\n"
-                "You may call tools by responding with a JSON object in this exact format:\n"
-                '```json\n{"tool_calls": [{"name": "<tool_name>", "arguments": {<args>}}]}\n```\n'
-                "If you want to call a tool, your ENTIRE response must be that JSON object and nothing else.\n\n"
+                "You have access to the following tools. If you need to use them, return them in the 'tool_calls' field.\n\n"
                 + "\n\n".join(tool_descriptions)
             )
             if system_prompt:
@@ -159,26 +167,45 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         t0 = time.time()
         try:
-            raw_response = llm_completion(user_prompt, system=system_prompt)
+            tool_calls_out = []
+            final_content = ""
+            raw_response = ""
+
+            if tools:
+                logger.info("Using structured completion for tool calls...")
+                parsed_resp = llm_completion_structured(user_prompt, BridgeChatResponse, system=system_prompt, max_retries=2)
+                raw_response = parsed_resp.model_dump_json()
+                
+                if parsed_resp.tool_calls:
+                    for call in parsed_resp.tool_calls:
+                        tool_calls_out.append({
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(call.arguments)
+                            }
+                        })
+                else:
+                    final_content = parsed_resp.content or ""
+            else:
+                raw_response = llm_completion(user_prompt, system=system_prompt)
+                final_content = raw_response
+                
+                # Fallback for parsing tool calls without explicit tools array
+                parsed_tool_calls = self._try_parse_tool_calls(raw_response)
+                if parsed_tool_calls:
+                    tool_calls_out = parsed_tool_calls
+                    final_content = ""
+
         except Exception as e:
             logger.error("llm_completion failed: %s", e)
             self._json_error(502, f"LLM backend error: {e}")
             return
+            
         elapsed = time.time() - t0
         logger.info("Bridge response in %.2fs: %d chars", elapsed, len(raw_response))
         logger.info(f"LLM Response:\n{raw_response}\n")
-
-        # Always attempt to parse tool calls from the raw response.
-        # OpenClaw expects tool calls to be returned in standard OpenAI
-        # format (`choices[0].message.tool_calls`), even if it didn't
-        # explicitly send a `tools` array in the request body.
-        tool_calls_out = []
-        final_content = raw_response
-        
-        parsed_tool_calls = self._try_parse_tool_calls(raw_response)
-        if parsed_tool_calls:
-            tool_calls_out = parsed_tool_calls
-            final_content = ""  # tool-call responses have no text content
 
         # Build OpenAI-format response
         choice = {
