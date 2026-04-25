@@ -1,73 +1,100 @@
-# LLM Bridge
+# GemmaClaw Bridge
 
-An OpenAI-compatible HTTP bridge for free AI inference, using the Google Gemini SDK behind the scenes. This bridge allows any application or agent framework (like OpenClaw, PicoClaw, AutoGPT, etc.) that speaks the standard OpenAI API protocol to route its inference through a custom Python client.
+An ultra-lightweight, OpenAI-compatible HTTP bridge that allows any agent framework (like OpenClaw or PicoClaw) to use **free Google Gemini inference** with full tool-calling and streaming support.
+
+## Why is this needed?
+The Google Gemini/Gemma models available in AI Studio offer incredibly generous free tiers and rate limits, making them perfect for powering local, always-on AI agents. However, many of the smaller or open-weights models (like Gemma) do not officially support native OpenAI-compatible tool calling, making them incompatible with major agent frameworks. 
+
+This bridge sits between your agent and the Google API. It takes standard OpenAI tool definitions, injects them into the model's system prompt, forces the LLM to output strictly-typed JSON using Google's Structured Output functionality, and translates that JSON back into a flawless OpenAI `tool_calls` response. To the agent, it looks exactly like you are talking to GPT-4!
+
+
+### Free Tier Limits (AI Studio)
+
 
 ## Features
+- **OpenAI Compatible:** Acts exactly like OpenAI's `/v1/chat/completions`.
+- **Free Inference:** Routes all traffic through the official Google Gemini SDK (free tier).
+- **Native Tool Calling:** Intercepts agent tool schemas and guarantees perfectly structured JSON `tool_calls` back to the agent.
+- **Robust Streaming:** Uses Flask and Server-Sent Events (SSE) to prevent TUI hangs.
+- **Rate Limit & Key Rotation:** Automatically manages API limits and rotates through multiple API keys.
 
-- **OpenAI Compatible API:** Exposes a `/v1/chat/completions` endpoint that acts exactly like OpenAI.
-- **Free Inference:** Uses `llm_client.py` and the Google Gemini SDK for free inference (depending on your Gemini API tier).
-- **Tool Calling Support:** Injects tool schemas into system prompts and cleanly parses out the JSON tool responses back into the standard OpenAI `tool_calls` structure.
-- **Key Rotation & Rate Limiting:** Handles multiple API keys, RPM/TPM limits, and retries automatically through `llm_client.py`.
-- **Zero-Code Integration:** No need to modify your agent frameworks or Go/Node.js apps. Just point the API Base URL to this bridge.
+## 1. Setup
 
-## Installation
+### Get your Gemini API Key
+1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
+2. Sign in with your Google account and click **Create API Key**. It's completely free!
 
-1. Clone this repository (or copy the files).
-2. Install the required dependencies:
 
+
+### Install
+Clone this repository and install the requirements:
 ```bash
+git clone https://github.com/rachancheet/GemmaClaw-bridge
+cd GemmaClaw-Bridge
 pip install -r requirements.txt
 ```
 
-3. Create a `.env` file in the root directory (or use your existing one) with your API keys and configuration:
-
+### Configure
+Create a `.env` file in the root directory:
 ```env
-LLM_MODELS=gemma-3-27b-it
+LLM_MODELS=gemma-4-31b-it,gemma-4-26b-a4b-it
 GOOGLE_API_KEYS=your_gemini_api_key_1,your_gemini_api_key_2
 LLM_REQUESTS_PER_MINUTE=15
-LLM_TOKENS_PER_MINUTE=99999999
+LLM_TOKENS_PER_MINUTE=1000000
 LLM_REQUESTS_PER_DAY=1500
 LLM_MAX_CONSECUTIVE_FAILURES=2
 ```
 
-## Running the Bridge
+## 2. Running the Bridge
 
-Start the bridge server by running:
+You need to keep the bridge running in the background while your agent operates.
 
+**Option A: Using `tmux` (Recommended)**
 ```bash
+tmux new -s gemini_bridge
 python llm_bridge.py
+# Press Ctrl+B, then D to detach and leave it running in the background.
 ```
 
-The server will start listening on `http://0.0.0.0:5099`.
-
-## Connecting OpenClaw (or other agents)
-
-Update your framework's configuration to point to the bridge instead of the official OpenAI API.
-
-### Environment Variables
-If your framework uses environment variables:
-```env
-OPENAI_API_BASE=http://localhost:5099/v1
-OPENAI_API_KEY=not-needed
-OPENAI_MODEL_NAME=llm-bridge
+**Option B: Using `screen`**
+```bash
+screen -S gemini_bridge
+python llm_bridge.py
+# Press Ctrl+A, then D to detach.
 ```
 
-### JSON Config
-If your framework uses a configuration file (like OpenClaw/PicoClaw):
+**Option C: systemd Service (For permanent servers)**
+Create `/etc/systemd/system/geminibridge.service`:
+```ini
+[Unit]
+Description=GemmaClaw Bridge
+After=network.target
+
+[Service]
+User=your_user
+WorkingDirectory=/path/to/repo
+ExecStart=/usr/bin/python3 llm_bridge.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+Then run: `sudo systemctl enable --now geminibridge`
+
+## 3. Connecting OpenClaw
+
+Once the bridge is running (it listens on `http://0.0.0.0:5099` by default), simply update your OpenClaw or PicoClaw `config.json` to point to the bridge:
+
 ```json
 {
-  "model_name": "llm-bridge",
-  "model": "openai/llm-client-bridge",
-  "api_key": "not-needed",
-  "api_base": "http://localhost:5099/v1"
+  "model_list": [
+    {
+      "model_name": "gemini-bridge",
+      "model": "openai/gemini-bridge",
+      "api_key": "not-needed",
+      "api_base": "http://127.0.0.1:5099/v1"
+    }
+  ]
 }
 ```
-
-## Health Checks
-You can verify the bridge is running by visiting:
-- `http://localhost:5099/health`
-- `http://localhost:5099/v1/models`
-
-
-
-
+That's it! OpenClaw will now seamlessly route its inference through Gemini completely free of charge.
