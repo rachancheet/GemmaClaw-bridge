@@ -106,7 +106,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             
-            chunk = {
+            chunk1 = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
                 "created": created_time,
@@ -125,10 +125,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             }
                         }]
                     },
+                    "finish_reason": None
+                }]
+            }
+            chunk2 = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": "llm-client-bridge-mock",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
                     "finish_reason": "tool_calls"
                 }]
             }
-            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode())
+            self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode())
             self.wfile.write(b"data: [DONE]\n\n")
         else:
             response = {
@@ -318,7 +330,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             "arguments": tc["function"]["arguments"]
                         }
                     })
-                chunk = {
+                chunk1 = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
                     "created": created_time,
@@ -326,12 +338,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "choices": [{
                         "index": 0,
                         "delta": {"role": "assistant", "tool_calls": chunk_tool_calls},
+                        "finish_reason": None
+                    }]
+                }
+                chunk2 = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": "llm-client-bridge",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
                         "finish_reason": "tool_calls"
                     }]
                 }
-                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode())
+                self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode())
             else:
-                chunk = {
+                chunk1 = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
                     "created": created_time,
@@ -339,10 +363,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "choices": [{
                         "index": 0,
                         "delta": {"role": "assistant", "content": final_content},
+                        "finish_reason": None
+                    }]
+                }
+                chunk2 = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": "llm-client-bridge",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
                         "finish_reason": "stop"
                     }]
                 }
-                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode())
+                self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode())
 
             self.wfile.write(b"data: [DONE]\n\n")
         else:
