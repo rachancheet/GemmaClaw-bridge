@@ -12,8 +12,7 @@ import tiktoken
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
-from google.genai.errors import ClientError
-
+from google.genai.errors import APIError
 # Silence the httpx logger used by the google genai client
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -30,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 _tokenizer = tiktoken.get_encoding("cl100k_base")
 
-config = types.GenerateContentConfig()
 
 
 class LLMRateLimitError(Exception):
@@ -39,46 +37,6 @@ class LLMRateLimitError(Exception):
 
 class LLMFatalError(Exception):
     pass
-
-
-import json_repair
-
-
-def _extract_json_block(text: str) -> dict:
-    """Extract JSON even if model adds markdown or text."""
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError("No JSON found in output")
-
-    raw_json = match.group()
-
-    # Try strict parsing first
-    try:
-        return json.loads(raw_json)
-    except json.JSONDecodeError:
-        pass
-
-    # Detect code expressions that json_repair would silently mangle
-    # These patterns indicate the LLM used JS/Python code instead of plain JSON strings
-    code_patterns = [
-        (r'"[^"]*"\s*\+\s*"', "string concatenation with +"),
-        (r'\.repeat\s*\(', ".repeat() function call"),
-        (r'\.join\s*\(', ".join() function call"),
-        (r'\*\s*\d+', "multiplication operator"),
-        (r'"[^"]*"\s*\*\s*', "string repetition with *"),
-    ]
-    for pattern, description in code_patterns:
-        if re.search(pattern, raw_json):
-            raise ValueError(
-                f"Invalid JSON: detected {description} in value. "
-                f"JSON values must be plain string literals, not code expressions. "
-                f"Write out the full string content directly. "
-                f"For example, WRONG: \"hello\\n\" + \"hello\\n\".repeat(5) — "
-                f"CORRECT: \"hello\\nhello\\nhello\\nhello\\nhello\\nhello\""
-            )
-
-    # Fall back to json_repair for minor issues (trailing commas, etc.)
-    return json_repair.loads(raw_json)
 
 
 class RateLimitedLLMClient:
@@ -135,15 +93,15 @@ class RateLimitedLLMClient:
             # For simplistic compatibility with existing structure: (count, timestamp/date)
             for k in data.get("minute_requests", {}):
                 val = data["minute_requests"][k]
-                data["minute_requests"][k] = (val[0], datetime.fromisoformat(val[1]))
+                data["minute_requests"][k] = (val[0], datetime.fromisoformat(val[1]) if val[1] else None)
                 
             for k in data.get("minute_tokens", {}):
                 val = data["minute_tokens"][k]
-                data["minute_tokens"][k] = (val[0], datetime.fromisoformat(val[1]))
+                data["minute_tokens"][k] = (val[0], datetime.fromisoformat(val[1]) if val[1] else None)
                 
             for k in data.get("daily_requests", {}):
                 val = data["daily_requests"][k]
-                data["daily_requests"][k] = (val[0], datetime.fromisoformat(val[1]).date())
+                data["daily_requests"][k] = (val[0], datetime.fromisoformat(val[1]).date() if val[1] else None)
                 
             return data
         except Exception as e:
@@ -224,9 +182,21 @@ class RateLimitedLLMClient:
     # --------------------------------------------------
     # RAW COMPLETION
     # --------------------------------------------------
-    def completion(self, prompt: str, system: str = None) -> str:
+    def completion_raw(
+        self,
+        contents: list[types.Content],
+        system_instruction: Optional[str] = None,
+        tools: Optional[list[types.Tool]] = None,
+        response_schema: Optional[Type[BaseModel]] = None,
+        response_mime_type: Optional[str] = None
+    ) -> types.GenerateContentResponse:
         with self._lock:
-            estimated_tokens = self._estimate_tokens(prompt)
+            # Rough token estimation for contents
+            prompt_str = str(contents)
+            estimated_tokens = self._estimate_tokens(prompt_str)
+            if system_instruction:
+                estimated_tokens += self._estimate_tokens(system_instruction)
+                
             consecutive_round_failures: int = 0
             num_combinations = max(len(self._pool), 1)
             
@@ -253,32 +223,38 @@ class RateLimitedLLMClient:
                     try:
                         client = self._get_client(key)
 
-                        if system:
-                            full_prompt = f"[SYSTEM]\n{system}\n[/SYSTEM]\n\n{prompt}"
-                        else:
-                            full_prompt = prompt
+                        logger.info(f"LLM Prompt [Model: {model}]: {len(contents)} messages")
+                        
+                        gen_config = types.GenerateContentConfig(
+                            temperature=0.0,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                disable=True
+                            ) if tools else None
+                        )
+                        if system_instruction:
+                            gen_config.system_instruction = system_instruction
+                        if tools:
+                            gen_config.tools = tools
+                        if response_schema:
+                            gen_config.response_schema = response_schema
+                        if response_mime_type:
+                            gen_config.response_mime_type = response_mime_type
 
-                        logger.info(f"LLM Prompt [Model: {model}]: {full_prompt}")
                         resp = client.models.generate_content(
                             model=model,
-                            contents=full_prompt,
-                            config=config
+                            contents=contents,
+                            config=gen_config
                         )
 
-                        if resp.text is None:
-                            finish_reason = getattr(resp.candidates[0], 'finish_reason', 'unknown') if resp.candidates else 'no candidates'
-                            token_count = getattr(resp.usage_metadata, 'total_token_count', '?') if resp.usage_metadata else '?'
-                            logger.warning(
-                                f"LLM returned empty response. model={model}, "
-                                f"finish_reason={finish_reason}, prompt_tokens={token_count}. "
-                                f"This is common with smaller models on long prompts. Retrying..."
-                            )
+                        # Check if empty
+                        if not resp.candidates:
+                            logger.warning(f"LLM returned no candidates. model={model}. Retrying...")
                             continue
 
-                        text = resp.text.strip()
-                        used_tokens = estimated_tokens + self._estimate_tokens(text)
+                        token_count = getattr(resp.usage_metadata, 'total_token_count', '?') if resp.usage_metadata else '?'
+                        used_tokens = token_count if isinstance(token_count, int) else estimated_tokens + 50
                         self._update_counters(state_id, used_tokens)
-                        return text
+                        return resp
 
                     except Exception as e:
                         logger.error(f"LLM error with key/model index {i} (model: {model}): {e}")
@@ -290,6 +266,15 @@ class RateLimitedLLMClient:
                 logger.warning(f"All permutations failed (round {consecutive_round_failures}/{max_allowed}). Waiting 60s before retrying...")
                 time.sleep(60)
 
+    def completion(self, prompt: str, system: str = None) -> str:
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+        resp = self.completion_raw(contents=contents, system_instruction=system)
+        if resp.text:
+            return resp.text.strip()
+        if resp.candidates and resp.candidates[0].content.parts:
+            return resp.candidates[0].content.parts[0].text or ""
+        return ""
+
     # --------------------------------------------------
     # STRUCTURED COMPLETION
     # --------------------------------------------------
@@ -300,54 +285,32 @@ class RateLimitedLLMClient:
         system: Optional[str] = None,
         max_retries: int = 1,
     ) -> BaseModel:
-
-        schema_json = schema_model.model_json_schema()
-
-        strict_system = f"""
-You are a strict JSON API.
-Return ONLY valid JSON.
-No markdown. No explanation.
-JSON values must be simple valid JSON — no code expressions, concatenation operators, or function calls as values.
-For example, WRONG: "content": "hello\\n" + "hello\\n".repeat(36)
-CORRECT: "content": "hello\\nhello\\nhello\\n..."
-String values CAN contain code, or any text — just wrap them as a single JSON string literal.
-
-Schema:
-{json.dumps(schema_json, indent=2)}
-"""
-
-        if system:
-            strict_system = system + "\n\n" + strict_system
-
-        original_prompt = prompt
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+        
         last_error = None
-
         for attempt in range(max_retries):
             try:
-                raw = self.completion(prompt, strict_system)
-                logger.info(f"Raw LLM response:\n{raw}")
-                parsed = _extract_json_block(raw)
-                return schema_model.model_validate(parsed)
-
+                resp = self.completion_raw(
+                    contents=contents,
+                    system_instruction=system,
+                    response_schema=schema_model,
+                    response_mime_type="application/json"
+                )
+                
+                if resp.parsed:
+                    return resp.parsed
+                elif resp.text:
+                    logger.info(f"Raw LLM structured response:\n{resp.text}")
+                    return schema_model.model_validate_json(resp.text)
+                else:
+                    raise ValueError("No parsed or text content returned in structured response")
+                    
             except (LLMRateLimitError, LLMFatalError) as e:
-                # Direct API/quota failures should be propagated immediately, not treated as parse errors
                 raise e
             except Exception as e:
                 last_error = e
                 logger.warning(f"Structured parse failed attempt {attempt+1}: {e}")
-
-                prompt = f"""
-Previous output invalid.
-
-Error:
-{str(e)}
-
-Fix and return ONLY valid JSON.
-
-Original task:
-{original_prompt}
-"""
-
+                
         raise LLMFatalError(f"Structured output failed: {last_error}")
 
 
@@ -357,9 +320,25 @@ Original task:
 _client = RateLimitedLLMClient()
 
 
-def llm_completion(prompt: str, system: str = None) -> str:
+def llm_completion_raw(
+    contents: list[types.Content],
+    system_instruction: Optional[str] = None,
+    tools: Optional[list[types.Tool]] = None,
+    response_schema: Optional[Type[BaseModel]] = None,
+    response_mime_type: Optional[str] = None
+) -> types.GenerateContentResponse:
+    return _client.completion_raw(
+        contents,
+        system_instruction=system_instruction,
+        tools=tools,
+        response_schema=response_schema,
+        response_mime_type=response_mime_type
+    )
+
+
+def llm_completion_old(prompt: str, system: str = None) -> str:
     return _client.completion(prompt, system)
 
 
-def llm_completion_structured(prompt: str, schema_model: Type[BaseModel], system: str = None, max_retries: int = 1):
+def llm_completion_structured_old(prompt: str, schema_model: Type[BaseModel], system: str = None, max_retries: int = 1):
     return _client.completion_structured(prompt, schema_model, system, max_retries=max_retries)
