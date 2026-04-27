@@ -91,6 +91,33 @@ def health_check():
 def chat_completions():
     return _handle_chat_completions()
 
+
+# Keys that Google's genai SDK does not accept in parameter schemas
+_UNSUPPORTED_SCHEMA_KEYS = {
+    "patternProperties", "additionalProperties", "$schema",
+    "additionalItems", "unevaluatedProperties", "unevaluatedItems",
+    "if", "then", "else", "allOf", "anyOf", "oneOf", "not",
+    "dependentSchemas", "dependentRequired", "contentMediaType",
+    "contentEncoding", "examples", "const", "default", "title",
+}
+
+def _sanitize_schema(schema):
+    """Recursively strip JSON Schema keys that Google genai rejects."""
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = {}
+    for k, v in schema.items():
+        if k in _UNSUPPORTED_SCHEMA_KEYS:
+            continue
+        if isinstance(v, dict):
+            cleaned[k] = _sanitize_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [_sanitize_schema(i) if isinstance(i, dict) else i for i in v]
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
 def _handle_chat_completions():
     body = request.json or {}
     messages = body.get("messages", [])
@@ -161,7 +188,7 @@ def _handle_chat_completions():
                 function_declarations.append(types.FunctionDeclaration(
                     name=f.get("name", ""),
                     description=f.get("description", ""),
-                    parameters=f.get("parameters", {})
+                    parameters=_sanitize_schema(f.get("parameters", {}))
                 ))
         if function_declarations:
             genai_tools = [types.Tool(function_declarations=function_declarations)]

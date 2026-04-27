@@ -1,3 +1,5 @@
 .env
-.llm_requests.json
+.llm_requests
 openclaw/
+tests/
+__pycache__/
