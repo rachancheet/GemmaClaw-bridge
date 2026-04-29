@@ -31,7 +31,7 @@ sequenceDiagram
             CL-->>BR: GenerateContentResponse
         else Failure (429/500/Timeout)
             Note over CL: Mark failure, rotate to next API Key/Model
-            CL->>CL: Exponential Backoff (if pool exhausted)
+            CL->>CL: Wait LLM_RETRY_DELAY_SECONDS (if pool exhausted)
         end
     end
 
@@ -53,7 +53,7 @@ sequenceDiagram
 
 ### 2. Resiliency & Fallbacks
 - **API Key Rotation:** The client maintains a pool of all `GOOGLE_API_KEYS` combined with all configured `LLM_MODELS`. If one combination fails (429 Rate Limit or 500 Server Error), it immediately tries the next.
-- **Exponential Backoff:** If the entire pool of key/model combinations is exhausted, the client waits for `LLM_RETRY_DELAY_SECONDS` before retrying the entire pool again.
+- **Fixed Delay Retry:** If the entire pool of key/model combinations is exhausted, the client waits for a fixed `LLM_RETRY_DELAY_SECONDS` before retrying the entire pool again.
 - **Wait-on-Limit:** For deterministic rate limits (RPM/TPM), the client will sleep until the next minute starts rather than returning an error.
 
 ### 3. State Management

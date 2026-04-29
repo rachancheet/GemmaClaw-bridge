@@ -33,7 +33,7 @@ This allows OpenClaw to connect to the bridge as a standard `openai`-protocol pr
   - Reads from `.env` using `python-dotenv`.
   - Configures `GOOGLE_API_KEYS` for rotation.
   - Sets per-model rate limits (`RPM`, `TPM`, `RPD`).
-  - Configures `LLM_RETRY_DELAY_SECONDS` for exponential backoff/retry.
+  - Configures `LLM_RETRY_DELAY_SECONDS` for a fixed delay between retry rounds.
   - Sets `LLM_MAX_CONSECUTIVE_FAILURES` to define when to give up.
 
 ### 2. `llm_client.py` — The Inference Engine
@@ -42,7 +42,7 @@ This allows OpenClaw to connect to the bridge as a standard `openai`-protocol pr
   - **Native Tool Calling:** Uses `google.genai` native types for tool definitions and function calls.
   - **Structured Output:** Supports Pydantic-based `response_schema` enforcement.
   - **Rate Limiting & Persistence:** Tracks usage across keys/models and persists state to `.llm_requests` (saved on exit via `atexit`).
-  - **Reliability:** Implements a round-robin retry loop across all available key/model combinations with exponential backoff.
+  - **Reliability:** Implements a round-robin retry loop across all available key/model combinations. If the entire pool fails, the client waits for a fixed `LLM_RETRY_DELAY_SECONDS` before retrying.
   - **Timeouts:** Configured with a 180s timeout (`http_options={'timeout': 180000}`) to handle high-latency "Time to First Token" scenarios.
 
 ### 3. `llm_bridge.py` — OpenAI-Compatible Bridge
