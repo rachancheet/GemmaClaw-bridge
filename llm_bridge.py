@@ -120,6 +120,7 @@ def _sanitize_schema(schema):
 
 def _handle_chat_completions():
     body = request.json or {}
+    logger.info(f"Received request body: {json.dumps(body, indent=2)}")
     messages = body.get("messages", [])
     if not messages:
         return jsonify({"error": "messages is required"}), 400
